@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2017 The Tensor2Tensor Authors.
+# Copyright 2018 The Tensor2Tensor Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,16 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """ByteNet."""
 
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
-
-# Dependency imports
-
-from six.moves import xrange  # pylint: disable=redefined-builtin
+from six.moves import range  # pylint: disable=redefined-builtin
 
 from tensor2tensor.layers import common_hparams
 from tensor2tensor.layers import common_layers
@@ -36,8 +32,8 @@ def residual_dilated_conv(x, repeat, padding, name, hparams):
   with tf.variable_scope(name):
     k = (hparams.kernel_height, hparams.kernel_width)
     dilations_and_kernels = [((2**i, 1), k)
-                             for i in xrange(hparams.num_hidden_layers)]
-    for i in xrange(repeat):
+                             for i in range(hparams.num_hidden_layers)]
+    for i in range(repeat):
       with tf.variable_scope("repeat_%d" % i):
         y = common_layers.conv_block(
             common_layers.layer_norm(x, hparams.hidden_size, name="lnorm"),
@@ -80,7 +76,7 @@ def bytenet_internal(inputs, targets, hparams):
 @registry.register_model
 class ByteNet(t2t_model.T2TModel):
 
-  def model_fn_body(self, features):
+  def body(self, features):
     return bytenet_internal(features["inputs"], features["targets"],
                             self._hparams)
 
@@ -98,7 +94,7 @@ def bytenet_base():
   hparams.num_hidden_layers = 4
   hparams.kernel_height = 3
   hparams.kernel_width = 1
-  hparams.learning_rate_decay_scheme = "exp50k"
+  hparams.learning_rate_decay_scheme = "exp"
   hparams.learning_rate = 0.05
   hparams.learning_rate_warmup_steps = 3000
   hparams.initializer_gain = 1.0

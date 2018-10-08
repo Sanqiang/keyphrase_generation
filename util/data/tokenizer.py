@@ -65,6 +65,8 @@ _ALPHANUMERIC_CHAR_SET = set(
         unicodedata.category(six.unichr(i)).startswith("N")))
 _ALPHANUMERIC_CHAR_SET.add('#')
 _ALPHANUMERIC_CHAR_SET.add('@')
+_ALPHANUMERIC_CHAR_SET.add('<')
+_ALPHANUMERIC_CHAR_SET.add('>')
 
 
 def encode(text):

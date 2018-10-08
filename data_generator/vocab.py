@@ -46,6 +46,7 @@ class Vocab:
         for line in open(self.vocab_path, encoding='utf-8'):
             items = line.strip().split('\t')
             w = items[0]
+            cnt = 9999
             if len(items) > 1:
                 cnt = int(items[1])
             # else:
@@ -70,10 +71,12 @@ class Vocab:
     def contain(self, w):
         return w in self.w2i
 
-    def describe(self, i):
+    def describe(self, i, oov=None):
         if self.model_config.subword_vocab_size <= 0:
             if i < len(self.i2w):
                 return self.i2w[i]
+            elif oov is not None:
+                return oov['i2w'][i-self.vocab_size()]
         else:
             # Note in subword case, i should be list of id, i.e. ids.
             return self.subword.decode(i)

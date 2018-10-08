@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2017 The Tensor2Tensor Authors.
+# Copyright 2018 The Tensor2Tensor Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """Registry for models, hyperparameter settings, problem types, and datasets.
 
 Define a new model by subclassing T2TModel and register it:
@@ -46,21 +45,24 @@ from __future__ import print_function
 
 import inspect
 import re
-
-# Dependency imports
-
 import six
+import tensorflow as tf
 
-_MODELS = {}
+_ATTACKS = {}
+_ATTACK_PARAMS = {}
 _HPARAMS = {}
-_RANGED_HPARAMS = {}
+_MODELS = {}
 _PROBLEMS = {}
+_PRUNING_PARAMS = {}
+_PRUNING_STRATEGY = {}
+_RANGED_HPARAMS = {}
 
 
 class Modalities(object):
   SYMBOL = "symbol"
   IMAGE = "image"
   AUDIO = "audio"
+  VIDEO = "video"
   CLASS_LABEL = "class_label"
   GENERIC = "generic"
   REAL = "real"
@@ -70,6 +72,7 @@ _MODALITIES = {
     Modalities.SYMBOL: {},
     Modalities.IMAGE: {},
     Modalities.AUDIO: {},
+    Modalities.VIDEO: {},
     Modalities.CLASS_LABEL: {},
     Modalities.GENERIC: {},
     Modalities.REAL: {},
@@ -86,7 +89,8 @@ def _convert_camel_to_snake(name):
 
 
 def _reset():
-  for ctr in [_MODELS, _HPARAMS, _RANGED_HPARAMS] + list(_MODALITIES.values()):
+  for ctr in [_MODELS, _HPARAMS, _RANGED_HPARAMS, _ATTACK_PARAMS] + list(
+      _MODALITIES.values()):
     ctr.clear()
 
 
@@ -120,7 +124,7 @@ def register_model(name=None):
   def decorator(model_cls, registration_name=None):
     """Registers & returns model_cls with registration_name or default name."""
     model_name = registration_name or default_name(model_cls)
-    if model_name in _MODELS:
+    if model_name in _MODELS and not tf.contrib.eager.in_eager_mode():
       raise LookupError("Model %s already registered." % model_name)
     model_cls.REGISTERED_NAME = model_name
     _MODELS[model_name] = model_cls
@@ -136,12 +140,14 @@ def register_model(name=None):
 
 def model(name):
   if name not in _MODELS:
-    raise LookupError("Model %s never registered." % name)
+    raise LookupError("Model %s never registered.  Available models:\n %s" %
+                      (name, "\n".join(list_models())))
+
   return _MODELS[name]
 
 
 def list_models():
-  return list(_MODELS)
+  return list(sorted(_MODELS))
 
 
 def register_hparams(name=None):
@@ -150,7 +156,7 @@ def register_hparams(name=None):
   def decorator(hp_fn, registration_name=None):
     """Registers & returns hp_fn with registration_name or default name."""
     hp_name = registration_name or default_name(hp_fn)
-    if hp_name in _HPARAMS:
+    if hp_name in _HPARAMS and not tf.contrib.eager.in_eager_mode():
       raise LookupError("HParams set %s already registered." % hp_name)
     _HPARAMS[hp_name] = hp_fn
     return hp_fn
@@ -164,15 +170,22 @@ def register_hparams(name=None):
 
 
 def hparams(name):
+  """Retrieve registered hparams by name."""
   if name not in _HPARAMS:
     error_msg = "HParams set %s never registered. Sets registered:\n%s"
     raise LookupError(
         error_msg % (name,
                      display_list_by_prefix(list_hparams(), starting_spaces=4)))
-  return _HPARAMS[name]
+  hp = _HPARAMS[name]()
+  if hp is None:
+    raise TypeError("HParams %s is None. Make sure the registered function "
+                    "returns the HParams object." % name)
+  return hp
 
 
-def list_hparams():
+def list_hparams(prefix=None):
+  if prefix:
+    return [name for name in _HPARAMS if name.startswith(prefix)]
   return list(_HPARAMS)
 
 
@@ -217,7 +230,7 @@ def register_problem(name=None):
   def decorator(p_cls, registration_name=None):
     """Registers & returns p_cls with registration_name or default name."""
     p_name = registration_name or default_name(p_cls)
-    if p_name in _PROBLEMS:
+    if p_name in _PROBLEMS and not tf.contrib.eager.in_eager_mode():
       raise LookupError("Problem %s already registered." % p_name)
 
     _PROBLEMS[p_name] = p_cls
@@ -239,8 +252,7 @@ def problem(name):
     """Determines if problem_name specifies a copy and/or reversal.
 
     Args:
-      problem_name: A string containing a single problem name from
-        FLAGS.problems.
+      problem_name: str, problem name, possibly with suffixes.
 
     Returns:
       base_name: A string with the base problem name.
@@ -260,20 +272,181 @@ def problem(name):
   base_name, was_reversed, was_copy = parse_problem_name(name)
 
   if base_name not in _PROBLEMS:
-    raise LookupError("Problem %s never registered." % name)
+    all_problem_names = list_problems()
+    error_lines = ["%s not in the set of supported problems:" % base_name
+                  ] + all_problem_names
+    error_msg = "\n  * ".join(error_lines)
+    raise LookupError(error_msg)
   return _PROBLEMS[base_name](was_reversed, was_copy)
 
 
 def list_problems():
-  return list(_PROBLEMS)
+  return sorted(list(_PROBLEMS))
+
+
+def register_attack(name=None):
+  """Register an attack HParams set. Same behaviour as register_hparams."""
+
+  def decorator(attack_fn, registration_name=None):
+    """Registers & returns attack_fn with registration_name or default name."""
+    attack_name = registration_name or default_name(attack_fn)
+    if attack_name in _ATTACKS and not tf.contrib.eager.in_eager_mode():
+      raise LookupError("Attack %s already registered." % attack_name)
+    _ATTACKS[attack_name] = attack_fn
+    return attack_fn
+
+  # Handle if decorator was used without parens
+  if callable(name):
+    attack_fn = name
+    return decorator(attack_fn, registration_name=default_name(attack_fn))
+
+  return lambda attack_fn: decorator(attack_fn, name)
+
+
+def attacks(name):
+  """Retrieve registered attack by name."""
+  if name not in _ATTACKS:
+    error_msg = "Attack %s never registered. Sets registered:\n%s"
+    raise LookupError(
+        error_msg % (name,
+                     display_list_by_prefix(list_attacks(), starting_spaces=4)))
+  attack = _ATTACKS[name]()
+  if attack is None:
+    raise TypeError(
+        "Attack %s is None. Make sure the registered function returns a "
+        "`cleverhans.attack.Attack` object." % name)
+  return attack
+
+
+def list_attacks(prefix=None):
+  if prefix:
+    return [name for name in _ATTACKS if name.startswith(prefix)]
+  return list(_ATTACKS)
+
+
+def register_attack_params(name=None):
+  """Register an attack HParams set. Same behaviour as register_hparams."""
+
+  def decorator(ap_fn, registration_name=None):
+    """Registers & returns ap_fn with registration_name or default name."""
+    ap_name = registration_name or default_name(ap_fn)
+    if ap_name in _ATTACK_PARAMS and not tf.contrib.eager.in_eager_mode():
+      raise LookupError("Attack HParams set %s already registered." % ap_name)
+    _ATTACK_PARAMS[ap_name] = ap_fn
+    return ap_fn
+
+  # Handle if decorator was used without parens
+  if callable(name):
+    ap_fn = name
+    return decorator(ap_fn, registration_name=default_name(ap_fn))
+
+  return lambda ap_fn: decorator(ap_fn, name)
+
+
+def attack_params(name):
+  """Retrieve registered aparams by name."""
+  if name not in _ATTACK_PARAMS:
+    error_msg = "Attack HParams set %s never registered. Sets registered:\n%s"
+    raise LookupError(
+        error_msg %
+        (name, display_list_by_prefix(list_attack_params(), starting_spaces=4)))
+  ap = _ATTACK_PARAMS[name]()
+  if ap is None:
+    raise TypeError("Attack HParams %s is None. Make sure the registered "
+                    "function returns the HParams object." % name)
+  return ap
+
+
+def list_attack_params(prefix=None):
+  if prefix:
+    return [name for name in _ATTACK_PARAMS if name.startswith(prefix)]
+  return list(_ATTACK_PARAMS)
+
+
+def register_pruning_params(name=None):
+  """Register an pruning HParams set. Same behaviour as register_hparams."""
+
+  def decorator(pp_fn, registration_name=None):
+    """Registers & returns pp_fn with registration_name or default name."""
+    pp_name = registration_name or default_name(pp_fn)
+    if pp_name in _PRUNING_PARAMS and not tf.contrib.eager.in_eager_mode():
+      raise LookupError("Pruning HParams set %s already registered." % pp_name)
+    _PRUNING_PARAMS[pp_name] = pp_fn
+    return pp_fn
+
+  # Handle if decorator was used without parens
+  if callable(name):
+    pp_fn = name
+    return decorator(pp_fn, registration_name=default_name(pp_fn))
+
+  return lambda pp_fn: decorator(pp_fn, name)
+
+
+def pruning_params(name):
+  """Retrieve registered pruning params by name."""
+  if name not in _PRUNING_PARAMS:
+    error_msg = "Pruning HParams set %s never registered. Sets registered:\n%s"
+    raise LookupError(error_msg % (
+        name, display_list_by_prefix(list_pruning_params(), starting_spaces=4)))
+  pp = _PRUNING_PARAMS[name]()
+  if pp is None:
+    raise TypeError("Pruning HParams %s is None. Make sure the registered "
+                    "function returns the HParams object." % name)
+  return pp
+
+
+def list_pruning_params(prefix=None):
+  if prefix:
+    return [name for name in _PRUNING_PARAMS if name.startswith(prefix)]
+  return list(_PRUNING_PARAMS)
+
+
+def register_pruning_strategy(name=None):
+  """Register an pruning strategy. Same behaviour as register_hparams."""
+
+  def decorator(ps_fn, registration_name=None):
+    """Registers & returns ps_fn with registration_name or default name."""
+    ps_name = registration_name or default_name(ps_fn)
+    if ps_name in _PRUNING_STRATEGY and not tf.contrib.eager.in_eager_mode():
+      raise LookupError("Pruning strategy %s already registered." % ps_name)
+    _PRUNING_STRATEGY[ps_name] = ps_fn
+    return ps_fn
+
+  # Handle if decorator was used without parens
+  if callable(name):
+    ps_fn = name
+    return decorator(ps_fn, registration_name=default_name(ps_fn))
+
+  return lambda ps_fn: decorator(ps_fn, name)
+
+
+def pruning_strategies(name):
+  """Retrieve registered pruning strategies by name."""
+  if name not in _PRUNING_STRATEGY:
+    error_msg = "Pruning strategy set %s never registered. Sets registered:\n%s"
+    raise LookupError(
+        error_msg % (name,
+                     display_list_by_prefix(
+                         list_pruning_strategies(), starting_spaces=4)))
+  ps = _PRUNING_STRATEGY[name]
+  if ps is None:
+    raise TypeError("Pruning strategy %s is None. Make sure to register the "
+                    "function." % name)
+  return ps
+
+
+def list_pruning_strategies(prefix=None):
+  if prefix:
+    return [name for name in _PRUNING_STRATEGY if name.startswith(prefix)]
+  return list(_PRUNING_STRATEGY)
 
 
 def _internal_get_modality(name, mod_collection, collection_str):
   if name is None:
     name = "default"
   if name not in mod_collection:
-    raise LookupError("%s modality %s never registered." % (collection_str,
-                                                            name))
+    raise LookupError(
+        "%s modality %s never registered." % (collection_str, name))
   return mod_collection[name]
 
 
@@ -285,6 +458,11 @@ def symbol_modality(name=None):
 def generic_modality(name=None):
   return _internal_get_modality(name, _MODALITIES[Modalities.GENERIC],
                                 Modalities.GENERIC.capitalize())
+
+
+def video_modality(name=None):
+  return _internal_get_modality(name, _MODALITIES[Modalities.VIDEO],
+                                Modalities.VIDEO.capitalize())
 
 
 def audio_modality(name=None):
@@ -313,9 +491,9 @@ def _internal_register_modality(name, mod_collection, collection_str):
   def decorator(mod_cls, registration_name=None):
     """Registers & returns mod_cls with registration_name or default name."""
     mod_name = registration_name or default_name(mod_cls)
-    if mod_name in mod_collection:
-      raise LookupError("%s modality %s already registered." % (collection_str,
-                                                                mod_name))
+    if mod_name in mod_collection and not tf.contrib.eager.in_eager_mode():
+      raise LookupError(
+          "%s modality %s already registered." % (collection_str, mod_name))
     mod_collection[mod_name] = mod_cls
     return mod_cls
 
@@ -357,6 +535,12 @@ def register_image_modality(name=None):
                                      Modalities.IMAGE.capitalize())
 
 
+def register_video_modality(name=None):
+  """Register a video modality. name defaults to class name snake-cased."""
+  return _internal_register_modality(name, _MODALITIES[Modalities.VIDEO],
+                                     Modalities.VIDEO.capitalize())
+
+
 def register_class_label_modality(name=None):
   """Register an image modality. name defaults to class name snake-cased."""
   return _internal_register_modality(name, _MODALITIES[Modalities.CLASS_LABEL],
@@ -368,8 +552,8 @@ def list_modalities():
   for modality_type, modalities in six.iteritems(_MODALITIES):
     all_modalities.extend([
         "%s:%s" % (mtype, modality)
-        for mtype, modality in zip([modality_type] * len(modalities),
-                                   modalities)
+        for mtype, modality in zip([modality_type] *
+                                   len(modalities), modalities)
     ])
   return all_modalities
 
@@ -398,8 +582,9 @@ def create_modality(modality_spec, model_hparams):
   """
   retrieval_fns = {
       Modalities.SYMBOL: symbol_modality,
-      Modalities.AUDIO: audio_modality,
       Modalities.IMAGE: image_modality,
+      Modalities.AUDIO: audio_modality,
+      Modalities.VIDEO: video_modality,
       Modalities.CLASS_LABEL: class_label_modality,
       Modalities.GENERIC: generic_modality,
       Modalities.REAL: real_modality,
@@ -448,15 +633,30 @@ Registry contents:
 
   Problems:
 %s
-  """
-  m, hp, rhp, mod, probs = [
-      display_list_by_prefix(entries, starting_spaces=4)
-      for entries in [
+
+  Attacks:
+%s
+
+  Attack HParams:
+%s
+
+  Pruning HParams:
+%s
+
+  Pruning Strategies:
+%s
+"""
+  m, hp, rhp, mod, probs, atks, ap, pp, ps = [
+      display_list_by_prefix(entries, starting_spaces=4) for entries in [
           list_models(),
           list_hparams(),
           list_ranged_hparams(),
           list_modalities(),
-          list_problems()
+          list_problems(),
+          list_attacks(),
+          list_attack_params(),
+          list_pruning_params(),
+          list_pruning_strategies(),
       ]
   ]
-  return help_str % (m, hp, rhp, mod, probs)
+  return help_str % (m, hp, rhp, mod, probs, atks, ap, pp, ps)

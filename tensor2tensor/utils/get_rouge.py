@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2017 The Tensor2Tensor Authors.
+# Copyright 2018 The Tensor2Tensor Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """Computing rouge scores using pyrouge."""
 
 from __future__ import absolute_import
@@ -23,10 +22,7 @@ import logging
 import os
 import shutil
 from tempfile import mkdtemp
-
-# Dependency imports
-
-from pyrouge import Rouge155
+import pyrouge
 import tensorflow as tf
 
 FLAGS = tf.flags.FLAGS
@@ -50,11 +46,11 @@ def prep_data(decode_dir, target_dir):
         write_to_file(os.path.join(decode_dir, "rouge.%06d.txt" % (i+1)), d)
         write_to_file(os.path.join(target_dir, "rouge.A.%06d.txt" % (i+1)), t)
         if (i+1 % 1000) == 0:
-          tf.logging.into("Written %d examples to file" % i)
+          tf.logging.info("Written %d examples to file" % i)
 
 
 def main(_):
-  rouge = Rouge155()
+  rouge = pyrouge.Rouge155()
   rouge.log.setLevel(logging.ERROR)
   rouge.system_filename_pattern = "rouge.(\\d+).txt"
   rouge.model_filename_pattern = "rouge.[A-Z].#ID#.txt"

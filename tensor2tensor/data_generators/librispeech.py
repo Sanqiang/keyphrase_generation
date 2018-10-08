@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2017 The Tensor2Tensor Authors.
+# Copyright 2018 The Tensor2Tensor Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,27 +12,16 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """Librispeech dataset."""
 
 import os
-from subprocess import call
 import tarfile
-import wave
-
-# Dependency imports
-
-import numpy as np
-
 from tensor2tensor.data_generators import generator_utils
 from tensor2tensor.data_generators import problem
-from tensor2tensor.data_generators import text_encoder
-from tensor2tensor.layers import common_layers
-from tensor2tensor.utils import modality
+from tensor2tensor.data_generators import speech_recognition
 from tensor2tensor.utils import registry
 
 import tensorflow as tf
-
 
 _LIBRISPEECH_TRAIN_DATASETS = [
     [
@@ -48,7 +37,7 @@ _LIBRISPEECH_TRAIN_DATASETS = [
         "train-other-500"
     ],
 ]
-_LIBRISPEECH_TEST_DATASETS = [
+_LIBRISPEECH_DEV_DATASETS = [
     [
         "http://www.openslr.org/resources/12/dev-clean.tar.gz",
         "dev-clean"
@@ -56,6 +45,16 @@ _LIBRISPEECH_TEST_DATASETS = [
     [
         "http://www.openslr.org/resources/12/dev-other.tar.gz",
         "dev-other"
+    ],
+]
+_LIBRISPEECH_TEST_DATASETS = [
+    [
+        "http://www.openslr.org/resources/12/test-clean.tar.gz",
+        "test-clean"
+    ],
+    [
+        "http://www.openslr.org/resources/12/test-other.tar.gz",
+        "test-other"
     ],
 ]
 
@@ -75,141 +74,24 @@ def _collect_data(directory, input_ext, transcription_ext):
       transcript_path = os.path.join(root, transcript)
       with open(transcript_path, "r") as transcript_file:
         for transcript_line in transcript_file:
-          line_contents = transcript_line.split(" ", 1)
-          assert len(line_contents) == 2
+          line_contents = transcript_line.strip().split(" ", 1)
           media_base, label = line_contents
           key = os.path.join(root, media_base)
           assert key not in data_files
           media_name = "%s.%s"%(media_base, input_ext)
           media_path = os.path.join(root, media_name)
-          data_files[key] = (media_path, label)
+          data_files[key] = (media_base, media_path, label)
   return data_files
 
 
-def _get_audio_data(filepath):
-  # Construct a true .wav file.
-  out_filepath = filepath.strip(".flac") + ".wav"
-  # Assumes sox is installed on system. Sox converts from FLAC to WAV.
-  call(["sox", filepath, out_filepath])
-  wav_file = wave.open(open(out_filepath))
-  frame_count = wav_file.getnframes()
-  byte_array = wav_file.readframes(frame_count)
-
-  data = np.fromstring(byte_array, np.uint8).tolist()
-  return data, frame_count, wav_file.getsampwidth(), wav_file.getnchannels()
-
-
-class LibrispeechTextEncoder(text_encoder.TextEncoder):
-
-  def encode(self, s):
-    return [self._num_reserved_ids + ord(c) for c in s]
-
-  def decode(self, ids):
-    """Transform a sequence of int ids into a human-readable string.
-
-    EOS is not expected in ids.
-
-    Args:
-      ids: list of integers to be converted.
-    Returns:
-      s: human-readable string.
-    """
-    decoded_ids = []
-    for id_ in ids:
-      if 0 <= id_ < self._num_reserved_ids:
-        decoded_ids.append(text_encoder.RESERVED_TOKENS[int(id_)])
-      else:
-        decoded_ids.append(id_ - self._num_reserved_ids)
-    return "".join([chr(d) for d in decoded_ids])
-
-
-@registry.register_audio_modality
-class LibrispeechModality(modality.Modality):
-  """Performs strided conv compressions for audio spectral data."""
-
-  def bottom(self, inputs):
-    """Transform input from data space to model space.
-
-    Args:
-      inputs: A Tensor with shape [batch, ...]
-    Returns:
-      body_input: A Tensor with shape [batch, ?, ?, body_input_depth].
-    """
-    with tf.variable_scope(self.name):
-      # TODO(aidangomez): Will need to sort out a better audio pipeline
-      def xnet_resblock(x, filters, res_relu, name):
-        with tf.variable_scope(name):
-          # We only stride along the length dimension to preserve the spectral
-          # bins (which are tiny in dimensionality relative to length)
-          y = common_layers.separable_conv_block(
-              x,
-              filters, [((1, 1), (3, 3)), ((1, 1), (3, 3))],
-              first_relu=True,
-              padding="SAME",
-              force2d=True,
-              name="sep_conv_block")
-          y = common_layers.pool(y, (3, 3), "MAX", "SAME", strides=(2, 1))
-          return y + common_layers.conv_block(
-              x,
-              filters, [((1, 1), (1, 1))],
-              padding="SAME",
-              strides=(2, 1),
-              first_relu=res_relu,
-              force2d=True,
-              name="res_conv0")
-
-      # Rescale from UINT8 to floats in [-1,-1]
-      signals = (tf.to_float(inputs)-127)/128.
-      signals = tf.squeeze(signals, [2, 3])
-
-      # `stfts` is a complex64 Tensor representing the short-time Fourier
-      # Transform of each signal in `signals`. Its shape is
-      # [batch_size, ?, fft_unique_bins]
-      # where fft_unique_bins = fft_length // 2 + 1 = 513.
-      stfts = tf.contrib.signal.stft(signals, frame_length=1024, frame_step=512,
-                                     fft_length=1024)
-
-      # An energy spectrogram is the magnitude of the complex-valued STFT.
-      # A float32 Tensor of shape [batch_size, ?, 513].
-      magnitude_spectrograms = tf.abs(stfts)
-
-      # Warp the linear-scale, magnitude spectrograms into the mel-scale.
-      num_spectrogram_bins = magnitude_spectrograms.shape[-1].value
-      lower_edge_hertz, upper_edge_hertz, num_mel_bins = 80.0, 7600.0, 64
-      sample_rate = 16000
-      linear_to_mel_weight_matrix = (
-          tf.contrib.signal.linear_to_mel_weight_matrix(
-              num_mel_bins, num_spectrogram_bins, sample_rate, lower_edge_hertz,
-              upper_edge_hertz))
-      mel_spectrograms = tf.tensordot(
-          magnitude_spectrograms, linear_to_mel_weight_matrix, 1)
-      # Note: Shape inference for tensordot does not currently handle this case.
-      mel_spectrograms.set_shape(magnitude_spectrograms.shape[:-1].concatenate(
-          linear_to_mel_weight_matrix.shape[-1:]))
-
-      x = tf.expand_dims(mel_spectrograms, 2)
-      x.set_shape([None, None, None, num_mel_bins])
-      for i in xrange(self._model_hparams.audio_compression):
-        x = xnet_resblock(x, 2**(i + 1), True, "compress_block_%d" % i)
-      return xnet_resblock(x, self._body_input_depth, False,
-                           "compress_block_final")
-
-
 @registry.register_problem()
-class Librispeech(problem.Problem):
-  """Problem spec for English word to dictionary definition."""
+class Librispeech(speech_recognition.SpeechRecognitionProblem):
+  """Problem spec for Librispeech using clean and noisy data."""
 
-  @property
-  def is_character_level(self):
-    return True
-
-  @property
-  def input_space_id(self):
-    return problem.SpaceID.AUDIO_SPECTRAL
-
-  @property
-  def target_space_id(self):
-    return problem.SpaceID.EN_CHR
+  # Select only the clean data
+  TRAIN_DATASETS = _LIBRISPEECH_TRAIN_DATASETS
+  DEV_DATASETS = _LIBRISPEECH_DEV_DATASETS
+  TEST_DATASETS = _LIBRISPEECH_TEST_DATASETS
 
   @property
   def num_shards(self):
@@ -224,30 +106,17 @@ class Librispeech(problem.Problem):
     return 1
 
   @property
+  def num_test_shards(self):
+    return 1
+
+  @property
   def use_train_shards_for_dev(self):
     """If true, we only generate training data and hold out shards for dev."""
     return False
 
-  def feature_encoders(self, _):
-    return {
-        "inputs": text_encoder.TextEncoder(),
-        "targets": LibrispeechTextEncoder(),
-    }
-
-  def example_reading_spec(self):
-    data_fields = {
-        "inputs": tf.VarLenFeature(tf.int64),
-        "targets": tf.VarLenFeature(tf.int64),
-    }
-    data_items_to_decoders = None
-    return (data_fields, data_items_to_decoders)
-
-  def generator(self, data_dir, tmp_dir, training,
+  def generator(self, data_dir, tmp_dir, datasets,
                 eos_list=None, start_from=0, how_many=0):
-    eos_list = [1] if eos_list is None else eos_list
-    datasets = (_LIBRISPEECH_TRAIN_DATASETS if training
-                else _LIBRISPEECH_TEST_DATASETS)
-    num_reserved_ids = self.feature_encoders(None)["targets"].num_reserved_ids
+    del eos_list
     i = 0
     for url, subdir in datasets:
       filename = os.path.basename(url)
@@ -267,19 +136,24 @@ class Librispeech(problem.Problem):
       data_dir = os.path.join(tmp_dir, "LibriSpeech", subdir)
       data_files = _collect_data(data_dir, "flac", "txt")
       data_pairs = data_files.values()
-      for media_file, text_data in sorted(data_pairs)[start_from:]:
+
+      encoders = self.feature_encoders(None)
+      audio_encoder = encoders["waveforms"]
+      text_encoder = encoders["targets"]
+
+      for utt_id, media_file, text_data in sorted(data_pairs)[start_from:]:
         if how_many > 0 and i == how_many:
           return
         i += 1
-        audio_data, sample_count, sample_width, num_channels = _get_audio_data(
-            media_file)
-        label = [num_reserved_ids + ord(c) for c in text_data] + eos_list
+        wav_data = audio_encoder.encode(media_file)
+        spk_id, unused_book_id, _ = utt_id.split("-")
         yield {
-            "inputs": audio_data,
-            "audio/channel_count": [num_channels],
-            "audio/sample_count": [sample_count],
-            "audio/sample_width": [sample_width],
-            "targets": label
+            "waveforms": wav_data,
+            "waveform_lens": [len(wav_data)],
+            "targets": text_encoder.encode(text_data),
+            "raw_transcript": [text_data],
+            "utt_id": [utt_id],
+            "spk_id": [spk_id],
         }
 
   def generate_data(self, data_dir, tmp_dir, task_id=-1):
@@ -287,24 +161,99 @@ class Librispeech(problem.Problem):
         data_dir, self.num_shards, shuffled=False)
     dev_paths = self.dev_filepaths(
         data_dir, self.num_dev_shards, shuffled=False)
+    test_paths = self.test_filepaths(
+        data_dir, self.num_test_shards, shuffled=True)
+
+    generator_utils.generate_files(
+        self.generator(data_dir, tmp_dir, self.TEST_DATASETS), test_paths)
+
     if self.use_train_shards_for_dev:
       all_paths = train_paths + dev_paths
       generator_utils.generate_files(
-          self.generator(data_dir, tmp_dir, True), all_paths)
+          self.generator(data_dir, tmp_dir, self.TRAIN_DATASETS), all_paths)
       generator_utils.shuffle_dataset(all_paths)
     else:
       generator_utils.generate_dataset_and_shuffle(
-          self.generator(data_dir, tmp_dir, True), train_paths,
-          self.generator(data_dir, tmp_dir, False), dev_paths)
+          self.generator(data_dir, tmp_dir, self.TRAIN_DATASETS), train_paths,
+          self.generator(data_dir, tmp_dir, self.DEV_DATASETS), dev_paths)
 
-  def hparams(self, defaults, unused_model_hparams):
-    p = defaults
-    p.stop_at_eos = int(False)
-    p.input_modality = {"inputs": ("audio:librispeech_modality", None)}
-    p.target_modality = (registry.Modalities.SYMBOL, 256)
 
-  def preprocess_example(self, example, mode, hparams):
-    return example
+@registry.register_problem()
+class LibrispeechTrainFullTestClean(Librispeech):
+  """Problem to train on full 960h, but evaluate on clean data only."""
+
+  def training_filepaths(self, data_dir, num_shards, shuffled):
+    return Librispeech.training_filepaths(self, data_dir, num_shards, shuffled)
+
+  def dev_filepaths(self, data_dir, num_shards, shuffled):
+    return LibrispeechClean.dev_filepaths(self, data_dir, num_shards, shuffled)
+
+  def test_filepaths(self, data_dir, num_shards, shuffled):
+    return LibrispeechClean.test_filepaths(self, data_dir, num_shards, shuffled)
+
+  def generate_data(self, data_dir, tmp_dir, task_id=-1):
+    raise Exception("Generate librispeech and librispeech_clean data.")
+
+  def filepattern(self, data_dir, mode, shard=None):
+    """Get filepattern for data files for mode.
+
+    Matches mode to a suffix.
+    * DatasetSplit.TRAIN: train
+    * DatasetSplit.EVAL: dev
+    * DatasetSplit.TEST: test
+    * tf.estimator.ModeKeys.PREDICT: dev
+
+    Args:
+      data_dir: str, data directory.
+      mode: DatasetSplit
+      shard: int, if provided, will only read data from the specified shard.
+
+    Returns:
+      filepattern str
+    """
+    shard_str = "-%05d" % shard if shard is not None else ""
+    if mode == problem.DatasetSplit.TRAIN:
+      path = os.path.join(data_dir, "librispeech")
+      suffix = "train"
+    elif mode in [problem.DatasetSplit.EVAL, tf.estimator.ModeKeys.PREDICT]:
+      path = os.path.join(data_dir, "librispeech_clean")
+      suffix = "dev"
+    else:
+      assert mode == problem.DatasetSplit.TEST
+      path = os.path.join(data_dir, "librispeech_clean")
+      suffix = "test"
+
+    return "%s-%s%s*" % (path, suffix, shard_str)
+
+
+@registry.register_problem()
+class LibrispeechCleanSmall(Librispeech):
+  """Problem spec for Librispeech using 100h clean train and clean eval data."""
+
+  # Select only the clean data
+  TRAIN_DATASETS = _LIBRISPEECH_TRAIN_DATASETS[:1]
+  DEV_DATASETS = _LIBRISPEECH_DEV_DATASETS[:1]
+  TEST_DATASETS = _LIBRISPEECH_TEST_DATASETS[:1]
+
+
+@registry.register_problem()
+class LibrispeechClean(Librispeech):
+  """Problem spec for Librispeech using 460h clean train and clean eval data."""
+
+  # Select only the clean data
+  TRAIN_DATASETS = _LIBRISPEECH_TRAIN_DATASETS[:2]
+  DEV_DATASETS = _LIBRISPEECH_DEV_DATASETS[:1]
+  TEST_DATASETS = _LIBRISPEECH_TEST_DATASETS[:1]
+
+
+@registry.register_problem()
+class LibrispeechNoisy(Librispeech):
+  """Problem spec for Librispeech using 400h noisy train and noisy eval data."""
+
+  # Select only the clean data
+  TRAIN_DATASETS = _LIBRISPEECH_TRAIN_DATASETS[2:]
+  DEV_DATASETS = _LIBRISPEECH_DEV_DATASETS[1:]
+  TEST_DATASETS = _LIBRISPEECH_TEST_DATASETS[1:]
 
 
 # TODO(lukaszkaiser): clean up hparams or remove from here.
@@ -320,4 +269,11 @@ def add_librispeech_hparams(hparams):
   hparams.learning_rate = 0.05
   hparams.train_steps = 5000000
   hparams.num_hidden_layers = 4
+  return hparams
+
+
+def set_librispeech_length_hparams(hparams):
+  hparams.max_length = 1650 * 80  # this limits inputs[1] * inputs[2]
+  hparams.max_input_seq_length = 1650
+  hparams.max_target_seq_length = 350
   return hparams

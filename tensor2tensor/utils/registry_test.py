@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2017 The Tensor2Tensor Authors.
+# Copyright 2018 The Tensor2Tensor Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,15 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """Tests for tensor2tensor.registry."""
 
 from __future__ import absolute_import
 from __future__ import division
 from __future__ import print_function
-
-# Dependency imports
-
 from tensor2tensor.utils import modality
 from tensor2tensor.utils import registry
 from tensor2tensor.utils import t2t_model
@@ -113,13 +109,13 @@ class HParamRegistryTest(tf.test.TestCase):
 
     @registry.register_hparams
     def my_hparams_set():
-      pass
+      return 3
 
     @registry.register_ranged_hparams
     def my_hparams_range(_):
       pass
 
-    self.assertTrue(registry.hparams("my_hparams_set") is my_hparams_set)
+    self.assertEqual(registry.hparams("my_hparams_set"), my_hparams_set())
     self.assertTrue(
         registry.ranged_hparams("my_hparams_range") is my_hparams_range)
 
@@ -127,13 +123,13 @@ class HParamRegistryTest(tf.test.TestCase):
 
     @registry.register_hparams("a")
     def my_hparams_set():
-      pass
+      return 7
 
     @registry.register_ranged_hparams("a")
     def my_hparams_range(_):
       pass
 
-    self.assertTrue(registry.hparams("a") is my_hparams_set)
+    self.assertEqual(registry.hparams("a"), my_hparams_set())
     self.assertTrue(registry.ranged_hparams("a") is my_hparams_range)
 
   def testUnknownHparams(self):
@@ -141,6 +137,15 @@ class HParamRegistryTest(tf.test.TestCase):
       registry.hparams("not_registered")
     with self.assertRaisesRegexp(LookupError, "never registered"):
       registry.ranged_hparams("not_registered")
+
+  def testNoneHparams(self):
+
+    @registry.register_hparams
+    def hp():
+      pass
+
+    with self.assertRaisesRegexp(TypeError, "is None"):
+      registry.hparams("hp")
 
   def testDuplicateRegistration(self):
 
@@ -267,6 +272,14 @@ class ModalityRegistryTest(tf.test.TestCase):
 
     self.assertSetEqual(set(registry.list_modalities()), set(expected))
 
+
+class RegistryTest(tf.test.TestCase):
+  """ Test class for common functions."""
+
+  def testRegistryHelp(self):
+    help_str = registry.help_string()
+    self.assertIsNotNone(help_str)
+    self.assertGreater(len(help_str), 0)
 
 if __name__ == "__main__":
   tf.test.main()

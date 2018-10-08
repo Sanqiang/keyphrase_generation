@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2017 The Tensor2Tensor Authors.
+# Copyright 2018 The Tensor2Tensor Authors.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -12,7 +12,6 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-
 """Xception."""
 
 from __future__ import absolute_import
@@ -20,10 +19,7 @@ from __future__ import division
 from __future__ import print_function
 
 import math
-
-# Dependency imports
-
-from six.moves import xrange  # pylint: disable=redefined-builtin
+from six.moves import range  # pylint: disable=redefined-builtin
 
 from tensor2tensor.layers import common_hparams
 from tensor2tensor.layers import common_layers
@@ -36,7 +32,7 @@ import tensorflow as tf
 def residual_block(x, hparams):
   """A stack of convolution blocks with residual connection."""
   k = (hparams.kernel_height, hparams.kernel_width)
-  dilations_and_kernels = [((1, 1), k) for _ in xrange(3)]
+  dilations_and_kernels = [((1, 1), k) for _ in range(3)]
   y = common_layers.subseparable_conv_block(
       x,
       hparams.hidden_size,
@@ -66,7 +62,7 @@ def xception_internal(inputs, hparams):
           force2d=True,
           name="small_image_conv")
 
-    for i in xrange(hparams.num_hidden_layers):
+    for i in range(hparams.num_hidden_layers):
       with tf.variable_scope("layer_%d" % i):
         cur = residual_block(cur, hparams)
 
@@ -74,9 +70,11 @@ def xception_internal(inputs, hparams):
 
 
 def xception_entry(inputs, hidden_dim):
+  """Xception entry flow."""
   with tf.variable_scope("xception_entry"):
 
     def xnet_resblock(x, filters, res_relu, name):
+      """Resblock."""
       with tf.variable_scope(name):
         y = common_layers.separable_conv_block(
             x,
@@ -95,9 +93,7 @@ def xception_entry(inputs, hidden_dim):
             force2d=True,
             name="res_conv0")
 
-    inputs = common_layers.standardize_images(inputs)
-    # TODO(lukaszkaiser): summaries here don't work in multi-problem case yet.
-    # tf.summary.image("inputs", inputs, max_outputs=2)
+    tf.summary.image("inputs", inputs, max_outputs=2)
     x = common_layers.conv_block(
         inputs,
         32, [((1, 1), (3, 3))],
@@ -114,6 +110,7 @@ def xception_entry(inputs, hidden_dim):
 
 
 def xception_exit(inputs):
+  """Xception exit flow."""
   with tf.variable_scope("xception_exit"):
     x = inputs
     x_shape = x.get_shape().as_list()
@@ -138,7 +135,7 @@ def xception_exit(inputs):
 @registry.register_model
 class Xception(t2t_model.T2TModel):
 
-  def model_fn_body(self, features):
+  def body(self, features):
     return xception_internal(features["inputs"], self._hparams)
 
 
@@ -146,7 +143,7 @@ class Xception(t2t_model.T2TModel):
 def xception_base():
   """Set of hyperparameters."""
   hparams = common_hparams.basic_params1()
-  hparams.batch_size = 4096
+  hparams.batch_size = 128
   hparams.hidden_size = 768
   hparams.dropout = 0.2
   hparams.symbol_dropout = 0.2
@@ -155,7 +152,7 @@ def xception_base():
   hparams.num_hidden_layers = 8
   hparams.kernel_height = 3
   hparams.kernel_width = 3
-  hparams.learning_rate_decay_scheme = "exp50k"
+  hparams.learning_rate_decay_scheme = "exp"
   hparams.learning_rate = 0.05
   hparams.learning_rate_warmup_steps = 3000
   hparams.initializer_gain = 1.0
@@ -171,7 +168,7 @@ def xception_base():
 @registry.register_hparams
 def xception_tiny():
   hparams = xception_base()
-  hparams.batch_size = 1024
+  hparams.batch_size = 2
   hparams.hidden_size = 64
   hparams.num_hidden_layers = 2
   hparams.learning_rate_decay_scheme = "none"
@@ -181,9 +178,7 @@ def xception_tiny():
 @registry.register_hparams
 def xception_tiny_tpu():
   hparams = xception_base()
-  hparams.tpu_batch_size_per_shard = 2
-  # The base exp50k scheme uses a cond which fails to compile on TPU
-  hparams.learning_rate_decay_scheme = "noam"
+  hparams.batch_size = 2
   hparams.num_hidden_layers = 2
   hparams.hidden_size = 128
   hparams.optimizer = "TrueAdam"
